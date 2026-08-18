@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
+import threading
 import time
 from datetime import date as _date
 from datetime import datetime, timezone
@@ -19,12 +20,16 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.services.fs_utils import atomic_write_text
 from app.strategy import monitor_rules
 from app.strategy.monitor import MonitorRuleEngine
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/lots", tags=["lots"])
+
+# 跨"批次文件 + 派生规则文件 + 引擎重载"的 read-modify-write 互斥 (镜像 watchlist 服务层)
+_write_lock = threading.Lock()
 
 
 def _data_dir(request: Request) -> Path:
@@ -46,29 +51,37 @@ def _now_iso() -> str:
 
 
 # ── 校验与归一化 ────────────────────────────────────────
+class LotValidationError(ValueError):
+    """带字段的批次校验错误, 供 API 层映射为结构化 400 ({field, message})。"""
+
+    def __init__(self, field: str, message: str) -> None:
+        super().__init__(message)
+        self.field = field
+
+
 def validate_lot(lot: dict) -> None:
-    """校验批次字段, 非法抛 ValueError (中文信息)。"""
+    """校验批次字段, 非法抛 LotValidationError (带字段, 供前端逐字段高亮)。"""
     if not (lot.get("symbol") or "").strip():
-        raise ValueError("symbol 不能为空")
+        raise LotValidationError("symbol", "symbol 不能为空")
     cost = lot.get("cost_price")
     if not isinstance(cost, (int, float)) or cost <= 0:
-        raise ValueError("cost_price 必须是正数")
+        raise LotValidationError("cost_price", "cost_price 必须是正数")
     for key, label in (("qty", "数量"), ("target_pct", "止盈%"), ("stop_pct", "止损%")):
         v = lot.get(key, 0)
         if not isinstance(v, (int, float)) or v < 0:
-            raise ValueError(f"{label} 不能为负数")
+            raise LotValidationError(key, f"{label} 不能为负数")
     lead = lot.get("lead_days", 0)
     if not isinstance(lead, int) or lead < 0:
-        raise ValueError("lead_days 必须是非负整数")
+        raise LotValidationError("lead_days", "lead_days 必须是非负整数")
     for key, label in (("buy_date", "买入日期"), ("remind_date", "到期日")):
         raw = lot.get(key)
         if raw not in (None, ""):
             try:
                 _date.fromisoformat(raw)
             except ValueError:
-                raise ValueError(f"{label} 必须是 YYYY-MM-DD: {raw!r}")
+                raise LotValidationError(key, f"{label} 必须是 YYYY-MM-DD: {raw!r}") from None
     if not (lot.get("target_pct", 0) > 0 or lot.get("stop_pct", 0) > 0 or lot.get("remind_date")):
-        raise ValueError("止盈% / 止损% / 到期日 至少设置一项 (否则无监控点)")
+        raise LotValidationError("monitor_point", "止盈% / 止损% / 到期日 至少设置一项 (否则无监控点)")
 
 
 def normalize(lot: dict) -> dict:
@@ -100,7 +113,7 @@ def load_all(data_dir: Path) -> list[dict]:
 def save_one(data_dir: Path, lot: dict) -> None:
     p = _path(data_dir, lot["id"])
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(lot, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(p, json.dumps(lot, ensure_ascii=False, indent=2))
 
 
 def delete_one(data_dir: Path, lot_id: str) -> bool:
@@ -196,28 +209,36 @@ def sync_lot(request: Request, lot: dict) -> None:
 
     生成规则继承用户默认推送渠道 (webhook_default_channels), 与 RuleEditor 建新规则
     行为一致; 否则批次告警会静默只走应用内, 持仓监控形同虚设。未配置默认渠道则为 []。
+    先校验全部规则、通过后才落盘: 否则校验失败 (400) 会留下"批次在而规则缺"的半成品。
     """
     from app.services import preferences
 
-    data_dir = _data_dir(request)
-    save_one(data_dir, lot)
-    default_channels = preferences.get_webhook_default_channels()
-    price_rule, date_rule = lot_to_rules(lot)
-    for rid, rule in ((f"{lot['id']}_p", price_rule), (f"{lot['id']}_d", date_rule)):
-        if rule is None:
+    with _write_lock:
+        data_dir = _data_dir(request)
+        default_channels = preferences.get_webhook_default_channels()
+        price_rule, date_rule = lot_to_rules(lot)
+        rules_to_write: list[dict] = []
+        rules_to_delete: list[str] = []
+        for rid, rule in ((f"{lot['id']}_p", price_rule), (f"{lot['id']}_d", date_rule)):
+            if rule is None:
+                rules_to_delete.append(rid)
+                continue
+            rule.setdefault("webhook_channels", list(default_channels))
+            # 保留旧 created_at, 避免编辑后规则在监控中心列表跳位
+            existing = monitor_rules.load_one(data_dir, rid)
+            if existing and existing.get("created_at"):
+                rule["created_at"] = existing["created_at"]
+            try:
+                monitor_rules.validate(rule)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail={"message": str(e)}) from e
+            rules_to_write.append(monitor_rules.normalize(rule))
+        save_one(data_dir, lot)
+        for rid in rules_to_delete:
             monitor_rules.delete_one(data_dir, rid)
-            continue
-        rule.setdefault("webhook_channels", list(default_channels))
-        # 保留旧 created_at, 避免每次编辑批次规则在监控中心列表跳位
-        existing = monitor_rules.load_one(data_dir, rid)
-        if existing and existing.get("created_at"):
-            rule["created_at"] = existing["created_at"]
-        try:
-            monitor_rules.validate(rule)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        monitor_rules.save_one(data_dir, monitor_rules.normalize(rule))
-    _reload_engine(request)
+        for rule in rules_to_write:
+            monitor_rules.save_one(data_dir, rule)
+        _reload_engine(request)
 
 
 # ── API ────────────────────────────────────────────────
@@ -246,8 +267,10 @@ def upsert_lot(lot_in: LotModel, request: Request):
         lot["id"] = f"lot_{int(time.time() * 1000):x}_{secrets.token_hex(2)}"
     try:
         validate_lot(lot)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except LotValidationError as e:
+        raise HTTPException(status_code=400, detail={"field": e.field, "message": str(e)}) from e
+    except ValueError as e:  # 防御: 非字段级校验错误保持扁平消息
+        raise HTTPException(status_code=400, detail=str(e)) from e
     lot = normalize(lot)
     sync_lot(request, lot)
     return {"ok": True, "lot": lot}
@@ -255,10 +278,12 @@ def upsert_lot(lot_in: LotModel, request: Request):
 
 @router.delete("/{lot_id}")
 def delete_lot(lot_id: str, request: Request):
-    data_dir = _data_dir(request)
-    deleted = delete_one(data_dir, lot_id)
-    monitor_rules.delete_one(data_dir, f"{lot_id}_p")
-    monitor_rules.delete_one(data_dir, f"{lot_id}_d")
-    if deleted:
-        _reload_engine(request)
+    with _write_lock:
+        data_dir = _data_dir(request)
+        deleted = delete_one(data_dir, lot_id)
+        # 两条都要删: 用 or 会短路跳过第二条
+        deleted_p = monitor_rules.delete_one(data_dir, f"{lot_id}_p")
+        deleted_d = monitor_rules.delete_one(data_dir, f"{lot_id}_d")
+        if deleted or deleted_p or deleted_d:
+            _reload_engine(request)
     return {"ok": True}

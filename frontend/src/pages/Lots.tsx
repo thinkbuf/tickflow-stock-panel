@@ -240,7 +240,13 @@ function LotDialog({ lot, onClose }: { lot: Lot; onClose: () => void }) {
   const qc = useQueryClient()
   const [draft, setDraft] = useState<Lot>(() => ({ ...lot }))
   const [symbolQuery, setSymbolQuery] = useState('')
-  const [error, setError] = useState('')
+  // 后端结构化校验错误: 带 field 时高亮对应输入框, 否则仅渲染横幅
+  const [err, setErr] = useState<{ field?: string; message: string } | null>(null)
+
+  const errBorder = (field: string) =>
+    err?.field === field ? 'border border-danger/60' : 'border border-border focus:border-accent/50'
+  const inputCls = (field: string) =>
+    cn('h-9 w-full rounded-btn bg-base px-3 text-xs text-foreground focus:outline-none', errBorder(field))
 
   const symbolSearch = useQuery({
     queryKey: QK.instrumentSearch(symbolQuery, 'stock'),
@@ -255,15 +261,20 @@ function LotDialog({ lot, onClose }: { lot: Lot; onClose: () => void }) {
       qc.invalidateQueries({ queryKey: QK.monitorRules })
       onClose()
     },
-    onError: err => setError(String((err as any)?.message ?? err)),
+    onError: err => {
+      const detail = (err as any)?.detail
+      setErr(detail && typeof detail === 'object' && typeof detail.field === 'string'
+        ? { field: detail.field, message: detail.message ?? String((err as Error).message) }
+        : { message: String((err as any)?.message ?? err) })
+    },
   })
 
   const submit = () => {
-    setError('')
-    if (!draft.symbol.trim()) return setError('请选择标的')
-    if (!(draft.cost_price > 0)) return setError('成本价必须为正数')
-    if (draft.qty < 0 || draft.target_pct < 0 || draft.stop_pct < 0 || draft.lead_days < 0) return setError('数量 / 百分比 / 提前天数不能为负数')
-    if (!(draft.target_pct > 0 || draft.stop_pct > 0 || draft.remind_date)) return setError('止盈% / 止损% / 到期日 至少设置一项')
+    setErr(null)
+    if (!draft.symbol.trim()) return setErr({ message: '请选择标的' })
+    if (!(draft.cost_price > 0)) return setErr({ message: '成本价必须为正数' })
+    if (draft.qty < 0 || draft.target_pct < 0 || draft.stop_pct < 0 || draft.lead_days < 0) return setErr({ message: '数量 / 百分比 / 提前天数不能为负数' })
+    if (!(draft.target_pct > 0 || draft.stop_pct > 0 || draft.remind_date)) return setErr({ message: '止盈% / 止损% / 到期日 至少设置一项' })
     save.mutate()
   }
 
@@ -294,7 +305,7 @@ function LotDialog({ lot, onClose }: { lot: Lot; onClose: () => void }) {
                 onChange={e => setSymbolQuery(e.target.value)}
                 placeholder="搜索代码或名称..."
                 autoFocus
-                className="h-9 w-full rounded-btn border border-border bg-base pl-8 pr-3 text-xs text-foreground focus:outline-none focus:border-accent/50"
+                className={cn('h-9 w-full rounded-btn bg-base pl-8 pr-3 text-xs text-foreground focus:outline-none', errBorder('symbol'))}
               />
               <Search className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-muted" />
               {symbolSearch.data && symbolSearch.data.results.length > 0 && (
@@ -318,19 +329,19 @@ function LotDialog({ lot, onClose }: { lot: Lot; onClose: () => void }) {
         <div className="grid grid-cols-2 gap-3">
           <label className="space-y-1.5">
             <span className="text-[11px] text-muted">数量 (参考)</span>
-            <input type="number" min={0} value={draft.qty} onChange={num(v => setDraft(d => ({ ...d, qty: v })))} className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs text-foreground" />
+            <input type="number" min={0} value={draft.qty} onChange={num(v => setDraft(d => ({ ...d, qty: v })))} className={inputCls('qty')} />
           </label>
           <label className="space-y-1.5">
             <span className="text-[11px] text-muted">成本价</span>
-            <input type="number" min={0} step="any" value={draft.cost_price} onChange={num(v => setDraft(d => ({ ...d, cost_price: v })))} className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs text-foreground" />
+            <input type="number" min={0} step="any" value={draft.cost_price} onChange={num(v => setDraft(d => ({ ...d, cost_price: v })))} className={inputCls('cost_price')} />
           </label>
           <label className="space-y-1.5">
             <span className="text-[11px] text-muted">止盈 %</span>
-            <input type="number" min={0} step="any" value={draft.target_pct} onChange={num(v => setDraft(d => ({ ...d, target_pct: v })))} className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs text-foreground" />
+            <input type="number" min={0} step="any" value={draft.target_pct} onChange={num(v => setDraft(d => ({ ...d, target_pct: v })))} className={inputCls('target_pct')} />
           </label>
           <label className="space-y-1.5">
             <span className="text-[11px] text-muted">止损 %</span>
-            <input type="number" min={0} step="any" value={draft.stop_pct} onChange={num(v => setDraft(d => ({ ...d, stop_pct: v })))} className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs text-foreground" />
+            <input type="number" min={0} step="any" value={draft.stop_pct} onChange={num(v => setDraft(d => ({ ...d, stop_pct: v })))} className={inputCls('stop_pct')} />
           </label>
         </div>
 
@@ -350,12 +361,16 @@ function LotDialog({ lot, onClose }: { lot: Lot; onClose: () => void }) {
         {draft.remind_date && (
           <label className="space-y-1.5">
             <span className="text-[11px] text-muted">提前提醒天数</span>
-            <input type="number" min={0} value={draft.lead_days} onChange={num(v => setDraft(d => ({ ...d, lead_days: Math.floor(v) })))} className="h-9 w-full rounded-btn border border-border bg-base px-3 text-xs text-foreground" />
+            <input type="number" min={0} value={draft.lead_days} onChange={num(v => setDraft(d => ({ ...d, lead_days: Math.floor(v) })))} className={inputCls('lead_days')} />
             <span className="block text-[10px] text-muted">提醒仅在交易时段评估; 到期日落在周末/节假日建议提前 ≥ 2 天</span>
           </label>
         )}
 
-        {error && <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] text-danger">{error}</div>}
+        {err && (
+          <div className="rounded border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] text-danger">
+            {err.message}
+          </div>
+        )}
       </div>
       <div className="flex items-center justify-end gap-2 border-t border-border/60 px-4 py-3">
         <button onClick={onClose} className="h-9 rounded-btn border border-border px-3 text-xs text-secondary hover:bg-elevated cursor-pointer">取消</button>

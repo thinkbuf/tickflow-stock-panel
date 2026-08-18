@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Tag, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp, Clock, RotateCcw, Import } from 'lucide-react'
-import { api, type KlineRow, type MinuteKlineRow } from '@/lib/api'
+import { api, type KlineRow, type MinuteKlineRow, type WatchlistEntry } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
 import { fmtPrice, fmtPct, fmtBigNum, priceColorClass, formatExtNumber } from '@/lib/format'
@@ -19,6 +19,7 @@ import {
 import { WatchlistImportDialog } from '@/components/WatchlistImportDialog'
 import { TagInput } from '@/components/TagInput'
 import { splitTags } from '@/lib/tags'
+import { createPerSymbolQueue } from '@/lib/tagWriteQueue'
 import { ColumnCustomizer } from '@/components/ColumnCustomizer'
 import { StockDataTable } from '@/components/stock-table/StockDataTable'
 import { VIRTUAL_LIST_THRESHOLD, useParentScroll } from '@/components/virtual-list/useParentScroll'
@@ -890,8 +891,15 @@ export function Watchlist() {
     },
   })
 
+  // R 只出现在返回位, TS 无法从箭头推断 → 显式传; useState 惰性建队列 (每渲染重建是浪费)
+  const [enqueueTagWrite] = useState(() =>
+    createPerSymbolQueue<string[], { symbols: WatchlistEntry[] }>(
+      (symbol, tags) => api.watchlistSetTags(symbol, tags),
+    ),
+  )
+
   const setTags = useMutation({
-    mutationFn: ({ symbol, tags }: { symbol: string; tags: string[] }) => api.watchlistSetTags(symbol, tags),
+    mutationFn: ({ symbol, tags }: { symbol: string; tags: string[] }) => enqueueTagWrite(symbol, tags),
     onSuccess: (data, variables) => {
       qc.setQueryData(QK.watchlist, data)
       // 标签只改自选行的 tags 字段, 就地 patch 该行即可, 不必整表重拉行情

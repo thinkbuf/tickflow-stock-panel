@@ -20,6 +20,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from app.services.fs_utils import atomic_write_text
 from app.strategy.custom_signals import ALLOWED_FIELDS
 from app.strategy.intraday_signals import uses_intraday_signals
 
@@ -83,7 +84,7 @@ def load_one(data_dir: Path, rule_id: str) -> dict | None:
 def save_one(data_dir: Path, rule: dict) -> None:
     p = _path(data_dir, rule["id"])
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(rule, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(p, json.dumps(rule, ensure_ascii=False, indent=2))
 
 
 def delete_one(data_dir: Path, rule_id: str) -> bool:
