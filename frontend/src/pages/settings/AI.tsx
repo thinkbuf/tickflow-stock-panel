@@ -371,7 +371,7 @@ export function SettingsAIPanel() {
             </>
           )}
           <div className="border-t border-border/20" />
-          <Field label="复盘输出上限">
+          <Field label="输出上限">
             <input type="number" min={500} max={32000} value={maxTokens} onChange={e => setMaxTokens(e.target.value)} className={INPUT_CLS} />
           </Field>
         </div>

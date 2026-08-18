@@ -256,6 +256,7 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
     from app.services.ai_provider import (
         ai_configured,
         clamp_ai_max_tokens,
+        current_ai_max_tokens,
         current_ai_model,
         current_ai_provider,
         current_codex_command,
