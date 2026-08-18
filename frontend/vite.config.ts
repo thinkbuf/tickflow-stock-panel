@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import path from 'node:path'
 
@@ -8,6 +8,10 @@ export default defineConfig({
     alias: {
       '@': path.resolve(__dirname, './src'),
     },
+  },
+  test: {
+    // 纯逻辑单测不需要 DOM; 组件测试再单独 jsdom (见 4 个 lib/*.test.ts)
+    environment: 'node',
   },
   server: {
     host: '0.0.0.0',   // 允许局域网访问

@@ -23,6 +23,8 @@ export function saveStockExternalTemplate(tpl: string): void {
 
 export function buildStockExternalUrl(template: string, symbol: string): string | null {
   if (!template) return null
+  // scheme 白名单: 只放行 http/https, 挡掉 javascript:/data: 等危险 scheme
+  if (!/^https?:\/\//i.test(template.trim())) return null
   const m = symbol.match(STOCK_SYMBOL_RE)
   if (!m) return null
   const code = m[1]

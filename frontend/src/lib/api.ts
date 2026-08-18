@@ -22,22 +22,28 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { ...fetchInit, headers })
   if (!res.ok) {
     let detail = ''
+    // 结构化 detail (object / FastAPI 422 数组) 原样挂到 err.detail, 供调用方做字段级渲染 (如批次校验 field)
+    let rawDetail: unknown
     try {
       const j = JSON.parse(await res.text())
       const raw = j.detail ?? j.message ?? ''
       if (Array.isArray(raw)) {
-        // FastAPI 422 校验错误: [{type, loc, msg, input}, ...] → 取 msg 拼接
+        // FastAPI 422 校验错误: [{type, loc, msg, input}, ...] → 取 msg 拼接 + 原样挂载
         detail = raw.map((e: any) => e?.msg || String(e)).join('; ')
+        rawDetail = raw
       } else if (typeof raw === 'string') {
         detail = raw
       } else if (raw && typeof raw === 'object') {
-        detail = JSON.stringify(raw)
+        detail = (raw as { message?: string }).message ?? JSON.stringify(raw)
+        rawDetail = raw
       }
     } catch { /* ignore */ }
     const msg = detail || `${res.status} ${res.statusText}`
     // 401 (未登录/会话过期) 不弹 toast — 由全局认证拦截器统一跳登录页, 避免刷屏
     if (res.status !== 401 && !quiet) toast(msg, 'error')
-    throw new Error(msg)
+    const err = new Error(msg) as Error & { detail?: unknown }
+    if (rawDetail) err.detail = rawDetail
+    throw err
   }
   return res.json() as Promise<T>
 }
